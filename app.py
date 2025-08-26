@@ -1,8 +1,6 @@
 # Streamlit Deduplicator (SRA-like)
 # -------------------------------------------------------------
-# A local, SRA-inspired deduplication app for systematic review search results.
-# - Pre-processing / mutators to normalize fields
-# - Multi-step matching: exact IDs + blocked fuzzy title similarity
+# - Exact ID matches + blocked fuzzy-title similarity
 # - Profiles: focused / balanced / relaxed (explained in UI)
 # - Buckets: extremely_likely / highly_likely / possible / review / unique
 # - Full audit, manual overrides, and exports (auto + final)
@@ -23,9 +21,9 @@ from lxml import etree
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
-# Canonical schema
+# ================ Canonical schema ================
 CANON_COLS = [
     "record_id", "source_file", "database", "title", "authors", "year", "journal",
     "volume", "issue", "pages", "doi", "pmid", "isbn", "url", "abstract",
@@ -52,15 +50,14 @@ ALGO_PRESETS = {
     "relaxed":   {"extreme": 99, "high": 96, "possible": 92, "block_title_prefix": 14, "year_window": 0},
 }
 
-# ---------------- Normalizers ----------------
+# ================ Helpers ================
 
 def normalize_text(s: Optional[str]) -> str:
     if not isinstance(s, str):
         return ""
-    s = unidecode(s)  # strip accents
-    s = s.strip().lower()
+    s = unidecode(s).strip().lower()
     s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[^0-9a-z\s]", "", s)  # keep alnum + space
+    s = re.sub(r"[^0-9a-z\s]", "", s)
     return s
 
 def normalize_doi(doi: Optional[str]) -> str:
@@ -77,9 +74,37 @@ def normalize_authors(raw: Optional[str]) -> str:
     parts = [p.strip() for p in re.split(r";|,\s(?=[A-Z])|\|", raw) if p.strip()]
     return "; ".join(parts)
 
-# ---------------- Lightweight Parsers ----------------
+# ---- Safe UI display helpers (eliminate duplicate-column crashes) ----
 
-# RIS (subset)
+def _dedupe_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop truly duplicated column *names* (keep first)."""
+    return df.loc[:, ~pd.Index(df.columns).duplicated()]
+
+def _uniquify_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """If any duplicate *names* remain, suffix them __1, __2, ... so PyArrow never fails."""
+    cols = list(df.columns)
+    seen = {}
+    new = []
+    for c in cols:
+        if c in seen:
+            seen[c] += 1
+            new.append(f"{c}__{seen[c]}")
+        else:
+            seen[c] = 0
+            new.append(c)
+    out = df.copy()
+    out.columns = new
+    return out
+
+def _safe_slice(df: pd.DataFrame, show_all: bool, sample_n: int) -> pd.DataFrame:
+    view = df if show_all else df.head(sample_n)
+    # two-step guard:
+    view = _dedupe_cols(view)
+    view = _uniquify_cols(view)
+    return view
+
+# ================ Lightweight Parsers ================
+
 RIS_TAG_MAP = {
     "TI": "title", "T1": "title",
     "AU": "authors", "A1": "authors",
@@ -131,7 +156,6 @@ def parse_ris_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     df["source_file"] = source_file
     return to_canonical(df)
 
-# NBIB (subset)
 NBIB_MAP = {
     "PMID": "pmid",
     "TI": "title",
@@ -175,7 +199,6 @@ def parse_nbib_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     df["source_file"] = source_file
     return to_canonical(df)
 
-# EndNote XML
 ENDNOTE_XPATHS = {
     "title": ".//title",
     "authors": ".//contributors/authors/author/style",
@@ -211,7 +234,8 @@ def parse_endnote_xml_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     df["source_file"] = source_file
     return to_canonical(df)
 
-# CSV → canonical
+# ================ Canonicalization ================
+
 def to_canonical(df: pd.DataFrame) -> pd.DataFrame:
     rename = {}
     for c in df.columns:
@@ -219,8 +243,7 @@ def to_canonical(df: pd.DataFrame) -> pd.DataFrame:
         if key:
             rename[c] = key
     df = df.rename(columns=rename)
-    # ensure uniqueness right here
-    df = df.loc[:, ~pd.Index(df.columns).duplicated()]
+    df = _dedupe_cols(df)  # drop duplicate-named columns immediately
     for c in CANON_COLS:
         if c not in df.columns:
             df[c] = None
@@ -232,7 +255,7 @@ def to_canonical(df: pd.DataFrame) -> pd.DataFrame:
     df["authors"] = df["authors"].apply(normalize_authors)
     return df[CANON_COLS]
 
-# ---------------- Dedup Engine ----------------
+# ================ Dedup Engine ================
 
 def fingerprint_title(title: str) -> str:
     return normalize_text(title)
@@ -266,7 +289,6 @@ def build_clusters(df: pd.DataFrame, algo: str = "balanced"):
     work = df.copy().reset_index(drop=True)
     work["_idx"] = work.index
 
-    # normalized features
     work["_t_norm"] = work["title"].apply(fingerprint_title)
     work["_a_first"] = work["authors"].apply(lambda s: s.split(";")[0].strip().lower() if s else "")
     work["_year"] = work["year"].astype(str).str.extract(r"(\d{4})")[0].fillna("")
@@ -369,27 +391,17 @@ def build_clusters(df: pd.DataFrame, algo: str = "balanced"):
 
     audit = work.merge(bucket_df, left_on="cluster_id", right_index=True, how="left")
     audit = audit.reset_index(drop=True)
-
-    # hard guard: ensure unique column names (pyarrow/Streamlit requires this)
-    audit = audit.loc[:, ~audit.columns.duplicated()]
+    audit = _dedupe_cols(audit)   # drop duplicate-named columns if any
 
     deduped = audit[audit["decision"] == "keep"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
     removed = audit[audit["decision"] == "remove"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
     return deduped, removed, audit
 
-# ---------------- Exporters ----------------
+# ================ Exporters ================
 
 RIS_OUT_MAP = {
-    "title": "TI",
-    "authors": "AU",
-    "year": "PY",
-    "journal": "JO",
-    "volume": "VL",
-    "issue": "IS",
-    "pages": "SP",
-    "doi": "DO",
-    "url": "UR",
-    "abstract": "AB",
+    "title": "TI", "authors": "AU", "year": "PY", "journal": "JO",
+    "volume": "VL", "issue": "IS", "pages": "SP", "doi": "DO", "url": "UR", "abstract": "AB",
 }
 
 def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
@@ -409,29 +421,7 @@ def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
         lines.append("")
     return "\n".join(lines)
 
-# ---------------- UI helpers ----------------
-
-def _make_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename duplicate column names with suffixes so Streamlit/PyArrow never errors."""
-    cols = list(df.columns)
-    seen = {}
-    new = []
-    for c in cols:
-        if c in seen:
-            seen[c] += 1
-            new.append(f"{c}__{seen[c]}")
-        else:
-            seen[c] = 0
-            new.append(c)
-    out = df.copy()
-    out.columns = new
-    return out
-
-def _safe_show(df: pd.DataFrame, show_all: bool, sample_n: int) -> pd.DataFrame:
-    view = df if show_all else df.head(sample_n)
-    return _make_unique_columns(view)
-
-# ---------------- UI ----------------
+# ================ UI ================
 
 st.set_page_config(page_title="Deduplicator (SRA-like)", layout="wide")
 st.title("🧹 Deduplicator (SRA-like)")
@@ -443,12 +433,10 @@ with st.sidebar:
         "Algorithm profile",
         list(ALGO_PRESETS.keys()),
         index=1,
-        help="Select how aggressive the automatic deduplication should be."
+        help="Choose how aggressive the automatic deduplication should be."
     )
-
-    # Describe profiles right under the selector
     PROFILE_DESC = {
-        "focused":  "Catches more duplicates (higher recall). Lower fuzzy-title threshold; may need more manual review.",
+        "focused":  "Catches more duplicates (higher recall). Lower fuzzy-title threshold; may require more manual review.",
         "balanced": "Balanced recall vs precision. Recommended default for a first pass.",
         "relaxed":  "More conservative (higher precision). Fewer pairs auto-merged; you’ll review more clusters manually.",
     }
@@ -457,13 +445,11 @@ with st.sidebar:
     params = ALGO_PRESETS[algo]
     st.markdown(
         f"**Thresholds**  \\\n"
-        f"Extreme ≥ **{params['extreme']}**, High ≥ **{params['high']}**, "
-        f"Possible ≥ **{params['possible']}** (token_set_ratio)"
+        f"Extreme ≥ **{params['extreme']}**, High ≥ **{params['high']}**, Possible ≥ **{params['possible']}**"
     )
     st.markdown(
         f"**Blocking**  \\\n"
-        f"Title prefix: **{params['block_title_prefix']}** chars; "
-        f"Year window: **±{params['year_window']}**"
+        f"Title prefix: **{params['block_title_prefix']}** chars; Year window: **±{params['year_window']}**"
     )
     st.divider()
     st.write("**File types**: RIS (.ris), NBIB (.nbib/.txt), EndNote XML (.xml), CSV (.csv)")
@@ -475,13 +461,8 @@ uploaded = st.file_uploader(
 )
 
 if "state" not in st.session_state:
-    st.session_state.state = {
-        "raw_frames": [],
-        "combined": pd.DataFrame(columns=CANON_COLS),
-        "deduped": None,
-        "removed": None,
-        "audit": None,
-    }
+    st.session_state.state = {"raw_frames": [], "combined": pd.DataFrame(columns=CANON_COLS),
+                              "deduped": None, "removed": None, "audit": None}
 state = st.session_state.state
 
 # Parse uploads
@@ -508,24 +489,20 @@ if uploaded:
         combined = pd.concat(raws, ignore_index=True)
         combined["record_id"] = [f"R{100000+i}" for i in range(len(combined))]
         state["raw_frames"] = raws
-        state["combined"] = combined
+        state["combined"] = _dedupe_cols(combined)
 
 # Overview
 if len(state["combined"]):
     c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Total records", f"{len(state['combined']):,}")
-    with c2:
-        st.metric("With DOI", f"{(state['combined']['doi'] != '').sum():,}")
-    with c3:
-        st.metric("With PMID", f"{(state['combined']['pmid'] != '').sum():,}")
-    with c4:
-        st.metric("Unique titles (pre-dedup est.)", f"{state['combined']['title'].nunique():,}")
+    with c1: st.metric("Total records", f"{len(state['combined']):,}")
+    with c2: st.metric("With DOI", f"{(state['combined']['doi'] != '').sum():,}")
+    with c3: st.metric("With PMID", f"{(state['combined']['pmid'] != '').sum():,}")
+    with c4: st.metric("Unique titles (pre-dedup est.)", f"{state['combined']['title'].nunique():,}")
 
     with st.expander("Preview (sample vs full)"):
-        _preview_all = st.checkbox("Show all preview rows", value=False, key="preview_all")
+        show_all_prev = st.checkbox("Show all preview rows", value=False, key="preview_all")
         prev_df = state["combined"][CANON_COLS]
-        st.dataframe(_safe_show(prev_df, _preview_all, 30), use_container_width=True, hide_index=True)
+        st.dataframe(_safe_slice(prev_df, show_all_prev, 30), use_container_width=True, hide_index=True)
 
     run = st.button("🚀 Run deduplication", type="primary")
     if run:
@@ -540,84 +517,59 @@ if state.get("audit") is not None:
     removed = state["removed"]
     audit = state["audit"]
 
-    total = len(audit)
-    kept = len(deduped)
-    rem = len(removed)
+    total, kept, rem = len(audit), len(deduped), len(removed)
 
     st.subheader("Results")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Kept (deduplicated)", f"{kept:,}")
-    with c2:
-        st.metric("Removed as duplicates", f"{rem:,}")
-    with c3:
-        st.metric("Reduction", f"{(rem/total*100):.1f}%")
+    with c1: st.metric("Kept (deduplicated)", f"{kept:,}")
+    with c2: st.metric("Removed as duplicates", f"{rem:,}")
+    with c3: st.metric("Reduction", f"{(rem/total*100):.1f}%")
 
-    # Likelihood counts (color-coded badges)
     bucket_counts = audit["likelihood"].value_counts().reindex(
         ["extremely_likely", "highly_likely", "possible", "review", "unique"], fill_value=0
     )
-    LIKELIHOOD_COLORS = {
-        "extremely_likely": "#ef4444",  # red
-        "highly_likely":    "#f97316",  # orange
-        "possible":         "#eab308",  # amber
-        "review":           "#22c55e",  # green
-        "unique":           "#3b82f6",  # blue
+    COLORS = {
+        "extremely_likely": "#ef4444", "highly_likely": "#f97316",
+        "possible": "#eab308", "review": "#22c55e", "unique": "#3b82f6",
     }
-    def badge(label, count):
-        color = LIKELIHOOD_COLORS.get(label, "#6b7280")
-        text = label.replace("_", " ")
-        return (
-            f'<span style="display:inline-block;padding:4px 10px;border-radius:999px;'
-            f'background:{color};color:white;font-size:12px;margin-right:8px;margin-bottom:6px;">'
-            f'{text}: <strong>{count}</strong></span>'
-        )
-    st.markdown(
-        "**Buckets (by max title similarity within cluster):**<br/>" +
-        "".join(badge(k, int(bucket_counts[k])) for k in bucket_counts.index),
-        unsafe_allow_html=True
-    )
+    def badge(lbl, count):
+        return (f'<span style="display:inline-block;padding:4px 10px;border-radius:999px;'
+                f'background:{COLORS.get(lbl,"#6b7280")};color:white;font-size:12px;'
+                f'margin-right:8px;margin-bottom:6px;">{lbl.replace("_"," ")}: <strong>{count}</strong></span>')
+    st.markdown("**Buckets (by max title similarity within cluster):**<br/>" +
+                "".join(badge(k, int(bucket_counts[k])) for k in bucket_counts.index),
+                unsafe_allow_html=True)
 
-    # Deduplicated table (show all toggle)
     with st.expander("View deduplicated records (sample vs full)"):
-        _all_dedup = st.checkbox("Show all deduplicated rows", value=True, key="dedup_all")
-        st.dataframe(_safe_show(deduped, _all_dedup, 100), use_container_width=True, hide_index=True)
+        show_all_dedup = st.checkbox("Show all deduplicated rows", value=True, key="dedup_all")
+        st.dataframe(_safe_slice(deduped, show_all_dedup, 100), use_container_width=True, hide_index=True)
 
-    # Removed table (show all toggle)
     with st.expander("View removed duplicates (sample vs full)"):
-        _all_removed = st.checkbox("Show all removed rows", value=True, key="removed_all")
-        st.dataframe(_safe_show(removed, _all_removed, 100), use_container_width=True, hide_index=True)
+        show_all_removed = st.checkbox("Show all removed rows", value=True, key="removed_all")
+        st.dataframe(_safe_slice(removed, show_all_removed, 100), use_container_width=True, hide_index=True)
 
-    # Audit table (show all toggle) — NO duplicate columns, ever
     with st.expander("Audit table (sample vs full)"):
         show_cols = [c for c in CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score"]
                      if c in audit.columns]
         audit_view = audit.loc[:, show_cols]
-        _all_audit = st.checkbox("Show all audit rows", value=True, key="audit_all")
-        st.dataframe(_safe_show(audit_view, _all_audit, 200), use_container_width=True, hide_index=True)
+        show_all_audit = st.checkbox("Show all audit rows", value=True, key="audit_all")
+        st.dataframe(_safe_slice(audit_view, show_all_audit, 200), use_container_width=True, hide_index=True)
 
-    # ========= Manual Review & Overrides =========
+    # ===== Manual review & overrides =====
     st.subheader("Manual review & overrides")
-
     if "overrides" not in st.session_state:
-        # record_id -> "keep" | "remove"
-        st.session_state.overrides = {}
+        st.session_state.overrides = {}  # record_id -> "keep" | "remove"
 
     review_bucket = st.selectbox(
         "Choose a bucket to review",
         ["extremely_likely", "highly_likely", "possible", "review", "unique"],
-        index=2,  # default: possible
+        index=2,
     )
 
-    # Optional cluster filter
     bucket_subset = audit[audit["likelihood"] == review_bucket]
-    clusters_in_bucket = sorted(bucket_subset["cluster_id"].dropna().unique().tolist())
-    default_clusters = clusters_in_bucket[:20]
+    clusters = sorted(bucket_subset["cluster_id"].dropna().unique().tolist())
     chosen_clusters = st.multiselect(
-        "Filter to clusters (optional)",
-        options=clusters_in_bucket,
-        default=default_clusters,
-        help="Pick one or more clusters to focus on. Leave empty to show all in this bucket."
+        "Filter to clusters (optional)", options=clusters, default=clusters[:20]
     )
     if chosen_clusters:
         bucket_subset = bucket_subset[bucket_subset["cluster_id"].isin(chosen_clusters)]
@@ -626,7 +578,7 @@ if state.get("audit") is not None:
         "record_id","cluster_id","decision","likelihood","max_title_score",
         "title","authors","year","journal","doi","pmid","url","source_file","abstract"
     ]
-    review_cols = [c for c in review_cols if c in audit.columns]  # safety
+    review_cols = [c for c in review_cols if c in audit.columns]
 
     if "max_title_score" in bucket_subset.columns:
         bucket_subset = bucket_subset.sort_values(["cluster_id","max_title_score"], ascending=[True, False])
@@ -634,22 +586,16 @@ if state.get("audit") is not None:
     sub = bucket_subset.copy()
     sub["override_keep"] = False
     sub["override_remove"] = False
-
-    # Pre-seed overrides
     for i, r in sub.iterrows():
         rid = r.get("record_id")
         ov = st.session_state.overrides.get(rid)
-        if ov == "keep":
-            sub.at[i, "override_keep"] = True
-        elif ov == "remove":
-            sub.at[i, "override_remove"] = True
+        if ov == "keep": sub.at[i, "override_keep"] = True
+        if ov == "remove": sub.at[i, "override_remove"] = True
 
-    st.caption("Tick **override_keep** or **override_remove** (mutually exclusive). Use filters to focus by cluster.")
+    st.caption("Check **override_keep** or **override_remove** for each row (mutually exclusive).")
     edit = st.data_editor(
-        _make_unique_columns(sub[review_cols + ["override_keep","override_remove"]]),
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
+        _safe_slice(sub[review_cols + ["override_keep","override_remove"]], True, 999999),
+        use_container_width=True, hide_index=True, num_rows="dynamic",
         column_config={
             "abstract": st.column_config.TextColumn(width="medium"),
             "title": st.column_config.TextColumn(width="large"),
@@ -660,12 +606,11 @@ if state.get("audit") is not None:
     def _apply_overrides(df):
         for _, r in df.iterrows():
             rid = r.get("record_id")
-            if not rid:
-                continue
+            if not rid: continue
             keep = bool(r.get("override_keep"))
             remv = bool(r.get("override_remove"))
             if keep and remv:
-                st.session_state.overrides[rid] = "remove"  # if both, prefer remove; adjust if you wish
+                st.session_state.overrides[rid] = "remove"  # tie-breaker
             elif keep:
                 st.session_state.overrides[rid] = "keep"
             elif remv:
@@ -677,7 +622,6 @@ if state.get("audit") is not None:
         _apply_overrides(edit)
         st.success(f"Applied {len(st.session_state.overrides)} overrides.")
 
-    # Build final decision with overrides
     audit["decision_final"] = audit["decision"]
     mask_keep = audit["record_id"].map(lambda rid: st.session_state.overrides.get(rid) == "keep")
     mask_remove = audit["record_id"].map(lambda rid: st.session_state.overrides.get(rid) == "remove")
@@ -687,74 +631,49 @@ if state.get("audit") is not None:
     deduped_final = audit[audit["decision_final"] == "keep"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
     removed_final = audit[audit["decision_final"] == "remove"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
 
-    # Quick stats after overrides
     c1, c2, c3 = st.columns(3)
     with c1: st.metric("Kept (final)", f"{len(deduped_final):,}")
     with c2: st.metric("Removed (final)", f"{len(removed_final):,}")
     with c3: st.metric("Overrides", f"{len(st.session_state.overrides):,}")
 
-    # ---------------- Downloads ----------------
+    # ========== Downloads ==========
     st.subheader("Downloads (automatic results, all rows)")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.download_button(
-            "⬇️ Deduplicated CSV (auto)",
-            data=deduped.to_csv(index=False).encode("utf-8"),
-            file_name="deduplicated.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Deduplicated CSV (auto)",
+                           data=deduped.to_csv(index=False).encode("utf-8"),
+                           file_name="deduplicated.csv", mime="text/csv")
     with c2:
-        st.download_button(
-            "⬇️ Removed CSV (auto)",
-            data=removed.to_csv(index=False).encode("utf-8"),
-            file_name="duplicates_removed.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Removed CSV (auto)",
+                           data=removed.to_csv(index=False).encode("utf-8"),
+                           file_name="duplicates_removed.csv", mime="text/csv")
     with c3:
-        st.download_button(
-            "⬇️ Audit CSV (auto)",
-            data=audit.drop(columns=["decision_final"], errors="ignore").to_csv(index=False).encode("utf-8"),
-            file_name="dedup_audit.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Audit CSV (auto)",
+                           data=audit.drop(columns=["decision_final"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                           file_name="dedup_audit.csv", mime="text/csv")
     with c4:
-        st.download_button(
-            "⬇️ Deduplicated RIS (auto)",
-            data=dataframe_to_ris(deduped).encode("utf-8"),
-            file_name="deduplicated.ris",
-            mime="application/x-research-info-systems",
-        )
+        st.download_button("⬇️ Deduplicated RIS (auto)",
+                           data=dataframe_to_ris(deduped).encode("utf-8"),
+                           file_name="deduplicated.ris", mime="application/x-research-info-systems")
 
     st.subheader("Downloads with overrides (final, all rows)")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.download_button(
-            "⬇️ Deduplicated CSV (final)",
-            data=deduped_final.to_csv(index=False).encode("utf-8"),
-            file_name="deduplicated_final.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Deduplicated CSV (final)",
+                           data=deduped_final.to_csv(index=False).encode("utf-8"),
+                           file_name="deduplicated_final.csv", mime="text/csv")
     with c2:
-        st.download_button(
-            "⬇️ Removed CSV (final)",
-            data=removed_final.to_csv(index=False).encode("utf-8"),
-            file_name="duplicates_removed_final.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Removed CSV (final)",
+                           data=removed_final.to_csv(index=False).encode("utf-8"),
+                           file_name="duplicates_removed_final.csv", mime="text/csv")
     with c3:
-        st.download_button(
-            "⬇️ Audit CSV (with overrides)",
-            data=audit.to_csv(index=False).encode("utf-8"),
-            file_name="dedup_audit_with_overrides.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Audit CSV (with overrides)",
+                           data=audit.to_csv(index=False).encode("utf-8"),
+                           file_name="dedup_audit_with_overrides.csv", mime="text/csv")
     with c4:
-        st.download_button(
-            "⬇️ Deduplicated RIS (final)",
-            data=dataframe_to_ris(deduped_final).encode("utf-8"),
-            file_name="deduplicated_final.ris",
-            mime="application/x-research-info-systems",
-        )
+        st.download_button("⬇️ Deduplicated RIS (final)",
+                           data=dataframe_to_ris(deduped_final).encode("utf-8"),
+                           file_name="deduplicated_final.ris", mime="application/x-research-info-systems")
 
 st.markdown("")
 st.caption("Inspired by SRA/TERA Deduplicator workflow (mutators, blocking, fuzzy similarity, transparent audit).")
