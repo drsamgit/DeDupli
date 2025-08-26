@@ -566,7 +566,7 @@ if state.get("audit") is not None:
         st.dataframe(removed.head(100), use_container_width=True, hide_index=True)
 
     with st.expander("Audit table (sample 200)"):
-        show_cols = CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score", "source_file"]
+        show_cols = list(dict.fromkeys(CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score"]))
         st.dataframe(audit[show_cols].head(200), use_container_width=True, hide_index=True)
 
     # Downloads
