@@ -457,9 +457,9 @@ st.markdown(
     """
     <div style='text-align:center; font-size:15px; color:gray; margin-top:6px;'>
         by <b style="font-size:16px; font-weight:600; font-family:Georgia, serif; color:#2c3e50;">
-            Dr Sambit Sagar
+            Dr Sambit Sagar & Dr Dikhra Khan
         </b> 
-        with version <b>1.1</b><br>
+        app version <b>1.1</b><br>
         Local, privacy-friendly duplicate removal for search results
     </div>
     """,
