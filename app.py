@@ -1,4 +1,4 @@
-# Streamlit Deduplicator (SRA‑like)
+# DeDupli
 # -------------------------------------------------------------
 # A local, SRA‑inspired deduplication app for systematic review search results.
 # Key ideas mirrored from SRA/TERA Deduplicator (Forbes et al., 2024):
