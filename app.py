@@ -425,9 +425,47 @@ def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
 
 # ====================== UI ======================
 
-st.set_page_config(page_title="DeDupli for Systematic Review & Meta-Analysis", layout="wide")
-st.title("🧹 Automatic DeDuplicator of Articles for Systematic Review & Meta-Analysis")
-st.caption("by Dr Sambit Sagar  \nLocal, privacy-friendly duplicate removal for search results")
+# ====================== APP HEADER ======================
+
+st.set_page_config(
+    page_title="DeDupli App – Automatic DeDuplicator for Systematic Review & Meta-Analysis",
+    layout="wide"
+)
+
+# Main Heading
+st.markdown(
+    """
+    <h1 style='text-align:center; color:#2c3e50; font-size:38px;'>
+        🧹 DeDupli App
+    </h1>
+    """,
+    unsafe_allow_html=True
+)
+
+# Sub-heading
+st.markdown(
+    """
+    <h3 style='text-align:center; color:#34495e; font-size:20px; font-weight:400;'>
+        Automatic DeDuplicator of Articles for Systematic Review & Meta-Analysis
+    </h3>
+    """,
+    unsafe_allow_html=True
+)
+
+# Stylish Caption with author + version
+st.markdown(
+    """
+    <div style='text-align:center; font-size:15px; color:gray; margin-top:6px;'>
+        by <b style="font-size:16px; font-weight:600; font-family:Georgia, serif; color:#2c3e50;">
+            Dr Sambit Sagar
+        </b> 
+        with version <b>1.1</b><br>
+        Local, privacy-friendly duplicate removal for search results
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 
 with st.sidebar:
