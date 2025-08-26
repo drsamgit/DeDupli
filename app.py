@@ -456,11 +456,11 @@ with st.sidebar:
 
     params = ALGO_PRESETS[algo]
     st.markdown(
-        f"**Thresholds**  \\\n"
+        f"**Thresholds** \\\n"
         f"Extreme ≥ **{params['extreme']}**, High ≥ **{params['high']}**, Possible ≥ **{params['possible']}**"
     )
     st.markdown(
-        f"**Blocking**  \\\n"
+        f"**Blocking** \\\n"
         f"Title prefix: **{params['block_title_prefix']}** chars; Year window: **±{params['year_window']}**"
     )
     st.divider()
@@ -666,39 +666,39 @@ if state.get("audit") is not None:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.download_button("⬇️ Deduplicated CSV (auto)",
-                           data=deduped.to_csv(index=False).encode("utf-8"),
-                           file_name="deduplicated.csv", mime="text/csv")
+                            data=deduped.to_csv(index=False).encode("utf-8"),
+                            file_name="deduplicated.csv", mime="text/csv")
     with c2:
         st.download_button("⬇️ Removed CSV (auto)",
-                           data=removed.to_csv(index=False).encode("utf-8"),
-                           file_name="duplicates_removed.csv", mime="text/csv")
+                            data=removed.to_csv(index=False).encode("utf-8"),
+                            file_name="duplicates_removed.csv", mime="text/csv")
     with c3:
         st.download_button("⬇️ Audit CSV (auto)",
-                           data=audit.drop(columns=["decision_final"], errors="ignore").to_csv(index=False).encode("utf-8"),
-                           file_name="dedup_audit.csv", mime="text/csv")
+                            data=audit.drop(columns=["decision_final"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                            file_name="dedup_audit.csv", mime="text/csv")
     with c4:
         st.download_button("⬇️ Deduplicated RIS (auto)",
-                           data=dataframe_to_ris(deduped).encode("utf-8"),
-                           file_name="deduplicated.ris", mime="application/x-research-info-systems")
+                            data=dataframe_to_ris(deduped).encode("utf-8"),
+                            file_name="deduplicated.ris", mime="application/x-research-info-systems")
 
     st.subheader("Downloads with overrides (final, all rows)")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.download_button("⬇️ Deduplicated CSV (final)",
-                           data=deduped_final.to_csv(index=False).encode("utf-8"),
-                           file_name="deduplicated_final.csv", mime="text/csv")
+                            data=deduped_final.to_csv(index=False).encode("utf-8"),
+                            file_name="deduplicated_final.csv", mime="text/csv")
     with c2:
         st.download_button("⬇️ Removed CSV (final)",
-                           data=removed_final.to_csv(index=False).encode("utf-8"),
-                           file_name="duplicates_removed_final.csv", mime="text/csv")
+                            data=removed_final.to_csv(index=False).encode("utf-8"),
+                            file_name="duplicates_removed_final.csv", mime="text/csv")
     with c3:
         st.download_button("⬇️ Audit CSV (with overrides)",
-                           data=audit.to_csv(index=False).encode("utf-8"),
-                           file_name="dedup_audit_with_overrides.csv", mime="text/csv")
+                            data=audit.to_csv(index=False).encode("utf-8"),
+                            file_name="dedup_audit_with_overrides.csv", mime="text/csv")
     with c4:
         st.download_button("⬇️ Deduplicated RIS (final)",
-                           data=dataframe_to_ris(deduped_final).encode("utf-8"),
-                           file_name="deduplicated_final.ris", mime="application/x-research-info-systems")
+                            data=dataframe_to_ris(deduped_final).encode("utf-8"),
+                            file_name="deduplicated_final.ris", mime="application/x-research-info-systems")
 
 st.markdown("")
 st.caption("Inspired by SRA/TERA Deduplicator workflow (mutators, blocking, fuzzy similarity, transparent audit).")
