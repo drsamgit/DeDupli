@@ -426,7 +426,7 @@ def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
 # ====================== UI ======================
 
 st.set_page_config(page_title="DeDupli for Systematic Review & Meta-Analysis", layout="wide")
-st.title("🧹 DeDupli for Systematic Review & Meta-Analysis")
+st.title("🧹 Automatic DeDuplicator of Articles for Systematic Review & Meta-Analysis")
 st.caption("by Dr Sambit Sagar  \nLocal, privacy-friendly duplicate removal for search results")
 
 
