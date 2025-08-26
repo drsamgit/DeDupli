@@ -1,4 +1,4 @@
-# Streamlit Deduplicator (SRA‑like)
+# Deduplicator 
 
 A local, privacy‑friendly duplicate remover for reference libraries inspired by the SR‑Accelerator / TERA Deduplicator workflow.
 
