@@ -1,18 +1,17 @@
-# DeDupli
+# Streamlit Deduplicator (SRA-like)
 # -------------------------------------------------------------
-# A local, SRA‑inspired deduplication app for systematic review search results.
-# Key ideas mirrored from SRA/TERA Deduplicator (Forbes et al., 2024):
-#  - Pre‑processing / mutators to normalize fields
-#  - Multi‑step duplicate detection: exact IDs + fuzzy title similarity
+# A local, SRA-inspired deduplication app for systematic review search results.
+# Key ideas mirrored from SRA/TERA Deduplicator:
+#  - Pre-processing / mutators to normalize fields
+#  - Multi-step duplicate detection: exact IDs + fuzzy title similarity
 #  - Three algorithm profiles (focused / balanced / relaxed)
-#  - Buckets by likelihood (extremely likely / highly likely / possible / review)
-#  - Human‑review for borderline clusters + full audit exports
+#  - Buckets by likelihood (extremely likely / highly likely / possible / review / unique)
+#  - Human-review for borderline clusters + full audit exports
 #
-# Dependencies (install these first):
+# Dependencies:
 #   pip install streamlit pandas rapidfuzz lxml unidecode
-#
-# Optional parsers (uncomment if desired):
-#   pip install rispy  # for robust RIS parsing (we also provide a lightweight fallback)
+# Optional:
+#   pip install rispy   # if you want a full RIS parser; we include a lightweight one
 #
 # Run:
 #   streamlit run app.py
@@ -20,21 +19,16 @@
 
 import io
 import re
-import json
-import math
-import hashlib
-import zipfile
-import unicodedata
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
+from lxml import etree
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 # Canonical schema we try to map inputs to
 CANON_COLS = [
@@ -58,8 +52,11 @@ CSV_MAPPINGS = {
 }
 
 ALGO_PRESETS = {
+    # Focused: catch more duplicates (slightly lower fuzzy thresholds)
     "focused":   {"extreme": 98, "high": 95, "possible": 90, "block_title_prefix": 18, "year_window": 1},
+    # Balanced: default
     "balanced":  {"extreme": 98, "high": 94, "possible": 88, "block_title_prefix": 16, "year_window": 1},
+    # Relaxed: conservative (stricter thresholds)
     "relaxed":   {"extreme": 99, "high": 96, "possible": 92, "block_title_prefix": 14, "year_window": 0},
 }
 
@@ -91,7 +88,7 @@ def normalize_authors(raw: Optional[str]) -> str:
 
 # --------- Lightweight parsers ---------
 
-# RIS fallback (simple, robust subset). If rispy is installed, you can swap to that.
+# RIS fallback (subset)
 RIS_TAG_MAP = {
     "TI": "title", "T1": "title",
     "AU": "authors", "A1": "authors",
@@ -132,24 +129,21 @@ def parse_ris_bytes(b: bytes, source_file: str) -> pd.DataFrame:
         elif raw_line.strip() == "ER  -":
             commit_current()
         else:
-            # continuation lines: append to last textual field if plausible
             if current:
                 if any(k in current for k in ("abstract", "title")):
                     if "abstract" in current:
                         current["abstract"] += " " + raw_line.strip()
                     elif "title" in current:
                         current["title"] += " " + raw_line.strip()
-
     commit_current()
 
     df = pd.DataFrame(records)
     if not len(df):
         return pd.DataFrame(columns=CANON_COLS)
-
     df["source_file"] = source_file
     return to_canonical(df)
 
-# NBIB (PubMed) very simple parser (subset: PMID, TI, JT, DP, AU, LID (DOI), AB, URL)
+# NBIB (PubMed) simple subset
 NBIB_MAP = {
     "PMID": "pmid",
     "TI": "title",
@@ -158,7 +152,7 @@ NBIB_MAP = {
     "AU": "authors",
     "LID": "doi",
     "AB": "abstract",
-    "AID": "doi",  # often contains DOI + [doi]
+    "AID": "doi",
     "LR": None,
 }
 
@@ -169,7 +163,6 @@ def parse_nbib_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     def commit_current():
         nonlocal current
         if current:
-            # Clean DOI lines that may include suffixes like "[doi]"
             if "doi" in current and isinstance(current["doi"], str):
                 current["doi"] = re.sub(r"\s*\[doi\]$", "", current["doi"].strip(), flags=re.I)
             records.append(current)
@@ -197,9 +190,7 @@ def parse_nbib_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     df["source_file"] = source_file
     return to_canonical(df)
 
-# EndNote XML (.xml) parsing (lightweight via lxml)
-from lxml import etree
-
+# EndNote XML (.xml)
 ENDNOTE_XPATHS = {
     "title": ".//title",
     "authors": ".//contributors/authors/author/style",
@@ -235,31 +226,23 @@ def parse_endnote_xml_bytes(b: bytes, source_file: str) -> pd.DataFrame:
     df["source_file"] = source_file
     return to_canonical(df)
 
-# CSV parser with column auto‑mapping
+# CSV parser with column auto-mapping
 def to_canonical(df: pd.DataFrame) -> pd.DataFrame:
-    # Lowercase columns for mapping
     rename = {}
     for c in df.columns:
         key = CSV_MAPPINGS.get(c.strip().lower(), None)
         if key:
             rename[c] = key
     df = df.rename(columns=rename)
-    # Ensure required cols exist
     for c in CANON_COLS:
         if c not in df.columns:
             df[c] = None
-    # Clean/normalize core fields
     df["title"] = df["title"].astype(str).fillna("")
     df["authors"] = df["authors"].astype(str).fillna("")
-    df["year"] = (
-        df["year"].astype(str).str.extract(r"(\d{4})")[0]
-        .fillna("")
-    )
+    df["year"] = df["year"].astype(str).str.extract(r"(\d{4})")[0].fillna("")
     df["doi"] = df["doi"].apply(normalize_doi)
     df["pmid"] = df["pmid"].astype(str).str.extract(r"(\d+)")[0].fillna("")
     df["authors"] = df["authors"].apply(normalize_authors)
-
-    # Reorder & subset
     return df[CANON_COLS]
 
 # --------- Dedup engine ---------
@@ -354,7 +337,7 @@ def build_clusters(df: pd.DataFrame, algo: str = "balanced"):
                 if s >= params["possible"]:
                     candidates.append((a, b, s))
 
-    for a, b, s in candidates:
+    for a, b, _ in candidates:
         union(a, b)
 
     # Build clusters
@@ -387,7 +370,7 @@ def build_clusters(df: pd.DataFrame, algo: str = "balanced"):
         bucket.append((cid, lvl, max_s))
     bucket_df = pd.DataFrame(bucket, columns=["cluster_id", "likelihood", "max_title_score"]).set_index("cluster_id")
 
-    # Choose keeper in each non‑singleton cluster
+    # Choose keeper in each non-singleton cluster
     keep_rows = []
     remove_rows = []
     for cid, sub in work.groupby("cluster_id"):
@@ -405,8 +388,12 @@ def build_clusters(df: pd.DataFrame, algo: str = "balanced"):
     work["decision"] = np.where(work.index.isin(keep_rows), "keep", "remove")
 
     audit = work.merge(bucket_df, left_on="cluster_id", right_index=True, how="left")
+    # Return canonical columns + audit cols
     out_cols = CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score", "source_file"]
     audit = audit.reset_index(drop=True)
+
+    # ensure no duplicate column names (pyarrow/Streamlit requires uniqueness)
+    audit = audit.loc[:, ~audit.columns.duplicated()]
 
     deduped = audit[audit["decision"] == "keep"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
     removed = audit[audit["decision"] == "remove"][CANON_COLS + ["cluster_id"]].reset_index(drop=True)
@@ -447,28 +434,37 @@ def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
 
 # --------- UI ---------
 
-st.set_page_config(page_title="Deduplicator (SRA‑like)", layout="wide")
-st.title("🧹 Deduplicator (SRA‑like)")
-st.caption(
-    f"Local, privacy‑friendly duplicate removal for search results. v{APP_VERSION}"
-)
+st.set_page_config(page_title="Deduplicator (SRA-like)", layout="wide")
+st.title("🧹 Deduplicator (SRA-like)")
+st.caption(f"Local, privacy-friendly duplicate removal for search results. v{APP_VERSION}")
 
 with st.sidebar:
     st.header("Algorithm & Settings")
-    algo = st.selectbox("Algorithm profile", list(ALGO_PRESETS.keys()), index=1,
-                       help="Focused = catch more dups; Relaxed = stricter; Balanced = middle ground.")
+    algo = st.selectbox(
+        "Algorithm profile",
+        list(ALGO_PRESETS.keys()),
+        index=1,
+        help="Focused = catch more dups; Relaxed = stricter; Balanced = middle ground."
+    )
     params = ALGO_PRESETS[algo]
     st.markdown(
-        f"**Thresholds**  \\\n        Extreme ≥ **{params['extreme']}**, High ≥ **{params['high']}**, Possible ≥ **{params['possible']}** (token_set_ratio)"
+        f"**Thresholds**  \\\n"
+        f"Extreme ≥ **{params['extreme']}**, High ≥ **{params['high']}**, "
+        f"Possible ≥ **{params['possible']}** (token_set_ratio)"
     )
     st.markdown(
-        f"**Blocking**  \\\n        Title prefix: **{params['block_title_prefix']}** chars; Year window: **±{params['year_window']}**"
+        f"**Blocking**  \\\n"
+        f"Title prefix: **{params['block_title_prefix']}** chars; "
+        f"Year window: **±{params['year_window']}**"
     )
     st.divider()
     st.write("**File types**: RIS (.ris), NBIB (.nbib/.txt), EndNote XML (.xml), CSV (.csv)")
 
-uploaded = st.file_uploader("Upload one or more reference files", accept_multiple_files=True,
-                            type=["ris", "nbib", "txt", "xml", "csv"])
+uploaded = st.file_uploader(
+    "Upload one or more reference files",
+    accept_multiple_files=True,
+    type=["ris", "nbib", "txt", "xml", "csv"]
+)
 
 if "state" not in st.session_state:
     st.session_state.state = {
@@ -495,7 +491,7 @@ if uploaded:
         elif suf == "xml":
             df = parse_endnote_xml_bytes(b, name)
         elif suf == "csv":
-            df = to_canonical(pd.read_csv(io.BytesIO(b)),)
+            df = to_canonical(pd.read_csv(io.BytesIO(b)))
             df["source_file"] = name
         else:
             df = pd.DataFrame(columns=CANON_COLS)
@@ -509,7 +505,7 @@ if uploaded:
         state["raw_frames"] = raws
         state["combined"] = combined
 
-# Show overview
+# Overview
 if len(state["combined"]):
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -521,10 +517,14 @@ if len(state["combined"]):
         n_pmid = (state["combined"]["pmid"] != "").sum()
         st.metric("With PMID", f"{n_pmid:,}")
     with c4:
-        st.metric("Unique (pre‑dedup est.)", f"~{state['combined']['title'].nunique():,}")
+        st.metric("Unique titles (pre-dedup est.)", f"{state['combined']['title'].nunique():,}")
 
-    with st.expander("Preview sample (first 30)"):
-        st.dataframe(state["combined"][CANON_COLS].head(30), use_container_width=True, hide_index=True)
+    with st.expander("Preview (sample vs full)"):
+        show_all_preview = st.toggle("Show all rows", value=False)
+        if show_all_preview:
+            st.dataframe(state["combined"][CANON_COLS], use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(state["combined"][CANON_COLS].head(30), use_container_width=True, hide_index=True)
 
     run = st.button("🚀 Run deduplication", type="primary")
     if run:
@@ -552,56 +552,91 @@ if state.get("audit") is not None:
     with c3:
         st.metric("Reduction", f"{(rem/total*100):.1f}%")
 
-    # Likelihood buckets breakdown
+    # Likelihood buckets breakdown with colored legend + counts
     bucket_counts = audit["likelihood"].value_counts().reindex(
         ["extremely_likely", "highly_likely", "possible", "review", "unique"], fill_value=0
     )
-    st.write("**Buckets** (by max title similarity within cluster):")
-    st.table(bucket_counts.rename("records").to_frame())
 
-    with st.expander("View deduplicated records (first 100)"):
-        st.dataframe(deduped.head(100), use_container_width=True, hide_index=True)
+    # Color chips (CSS) and mapping
+    LIKELIHOOD_COLORS = {
+        "extremely_likely": "#ef4444",  # red
+        "highly_likely":    "#f97316",  # orange
+        "possible":         "#eab308",  # amber
+        "review":           "#22c55e",  # green (as requested different color)
+        "unique":           "#3b82f6",  # blue
+    }
 
-    with st.expander("View removed duplicates (first 100)"):
-        st.dataframe(removed.head(100), use_container_width=True, hide_index=True)
+    def badge(label: str, count: int) -> str:
+        color = LIKELIHOOD_COLORS.get(label, "#6b7280")
+        text = label.replace("_", " ")
+        return (
+            f'<span style="display:inline-block; padding:4px 8px; border-radius:999px; '
+            f'background:{color}; color:white; font-size:12px; margin-right:8px; margin-bottom:6px;">'
+            f'{text}: {count}</span>'
+        )
 
-    with st.expander("Audit table (sample 200)"):
+    legend_html = "".join(
+        badge(lbl, int(bucket_counts.get(lbl, 0)))
+        for lbl in ["extremely_likely", "highly_likely", "possible", "review", "unique"]
+    )
+    st.markdown(f"**Buckets:**<br/>{legend_html}", unsafe_allow_html=True)
+
+    # Panels with toggles to show all
+    with st.expander("View deduplicated records (sample vs full)"):
+        show_all_dedup = st.toggle("Show all deduplicated rows", value=False, key="show_all_dedup")
+        if show_all_dedup:
+            st.dataframe(deduped, use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(deduped.head(100), use_container_width=True, hide_index=True)
+
+    with st.expander("View removed duplicates (sample vs full)"):
+        show_all_removed = st.toggle("Show all removed rows", value=False, key="show_all_removed")
+        if show_all_removed:
+            st.dataframe(removed, use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(removed.head(100), use_container_width=True, hide_index=True)
+
+    with st.expander("Audit table (sample vs full)"):
+        # robust, duplicate-free show_cols
         show_cols = list(dict.fromkeys(CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score"]))
-        st.dataframe(audit[show_cols].head(200), use_container_width=True, hide_index=True)
+        show_all_audit = st.toggle("Show all audit rows", value=False, key="show_all_audit")
+        if show_all_audit:
+            st.dataframe(audit[show_cols], use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(audit[show_cols].head(200), use_container_width=True, hide_index=True)
 
-    # Downloads
-    st.subheader("Downloads")
+    # Downloads (ALL rows)
+    st.subheader("Downloads (All rows)")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.download_button(
-            "⬇️ Deduplicated CSV",
+            "⬇️ Deduplicated CSV (All)",
             data=deduped.to_csv(index=False).encode("utf-8"),
             file_name="deduplicated.csv",
             mime="text/csv",
         )
     with c2:
         st.download_button(
-            "⬇️ Removed (duplicates) CSV",
+            "⬇️ Removed (duplicates) CSV (All)",
             data=removed.to_csv(index=False).encode("utf-8"),
             file_name="duplicates_removed.csv",
             mime="text/csv",
         )
     with c3:
         st.download_button(
-            "⬇️ Audit CSV",
+            "⬇️ Audit CSV (All)",
             data=audit.to_csv(index=False).encode("utf-8"),
             file_name="dedup_audit.csv",
             mime="text/csv",
         )
     with c4:
         ris_txt = dataframe_to_ris(deduped)
-        st.download_button("⬇️ Deduplicated RIS", data=ris_txt.encode("utf-8"), file_name="deduplicated.ris", mime="application/x-research-info-systems")
-
-    st.info(
-        "Tip: for large libraries (> ~50k records), consider splitting by first letter of title or year to keep memory low."
-    )
+        st.download_button(
+            "⬇️ Deduplicated RIS (All)",
+            data=ris_txt.encode("utf-8"),
+            file_name="deduplicated.ris",
+            mime="application/x-research-info-systems"
+        )
 
 st.markdown("")
-st.caption(
-    "Inspired by the SRA/TERA Deduplicator algorithm design and buckets (Forbes et al., 2024)."
-)
+st.caption("Inspired by SRA/TERA Deduplicator algorithm design and buckets (Forbes et al., 2024).")
