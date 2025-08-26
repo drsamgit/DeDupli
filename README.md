@@ -1,6 +1,6 @@
 # Deduplicator 
 
-A local, privacy‑friendly duplicate remover for reference libraries inspired by the SR‑Accelerator / TERA Deduplicator workflow.
+A local, privacy‑friendly duplicate remover for reference libraries.
 
 ## Features
 - Import **RIS**, **NBIB** (PubMed), **EndNote XML**, or **CSV**
