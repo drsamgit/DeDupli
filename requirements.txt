@@ -4,3 +4,5 @@ rapidfuzz>=3.6
 lxml>=5.1
 unidecode>=1.3
 numpy>=1.26
+# Optional (for richer RIS parsing; the app already has a built-in fallback)
+# rispy>=1.0
