@@ -425,9 +425,10 @@ def dataframe_to_ris(df: pd.DataFrame, ty: str = "JOUR") -> str:
 
 # ====================== UI ======================
 
-st.set_page_config(page_title="Deduplicator (SRA-like)", layout="wide")
-st.title("🧹 Deduplicator (SRA-like)")
-st.caption(f"Local, privacy-friendly duplicate removal for search results. v{APP_VERSION}")
+st.set_page_config(page_title="DeDupli for Systematic Review & Meta-Analysis", layout="wide")
+st.title("🧹 DeDupli for Systematic Review & Meta-Analysis")
+st.caption("by Dr Sambit Sagar  \nLocal, privacy-friendly duplicate removal for search results")
+
 
 with st.sidebar:
     st.header("Algorithm & Settings")
