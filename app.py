@@ -1,12 +1,11 @@
 # Streamlit Deduplicator (SRA-like)
 # -------------------------------------------------------------
 # A local, SRA-inspired deduplication app for systematic review search results.
-# Key ideas mirrored from SRA/TERA Deduplicator:
-#  - Pre-processing / mutators to normalize fields
-#  - Multi-step duplicate detection: exact IDs + blocked fuzzy title similarity
-#  - Profiles: focused / balanced / relaxed
-#  - Buckets: extremely_likely / highly_likely / possible / review / unique
-#  - Full audit + exports
+# - Pre-processing / mutators to normalize fields
+# - Multi-step matching: exact IDs + blocked fuzzy title similarity
+# - Profiles: focused / balanced / relaxed
+# - Buckets: extremely_likely / highly_likely / possible / review / unique
+# - Full audit, manual overrides, and exports (auto + final)
 #
 # Run:
 #   pip install streamlit pandas rapidfuzz lxml unidecode numpy
@@ -24,7 +23,7 @@ from lxml import etree
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.4.0"
 
 # Canonical schema
 CANON_COLS = [
@@ -435,8 +434,17 @@ with st.sidebar:
         "Algorithm profile",
         list(ALGO_PRESETS.keys()),
         index=1,
-        help="Focused = catch more dups; Relaxed = stricter; Balanced = middle ground.",
+        help="Select how aggressive the automatic deduplication should be."
     )
+
+    # Describe profiles right under the selector
+    PROFILE_DESC = {
+        "focused":  "Catches more duplicates (higher recall). Slightly lower fuzzy-title threshold; may need more manual review.",
+        "balanced": "Balanced recall vs precision. Recommended default for a first pass.",
+        "relaxed":  "More conservative (higher precision). Fewer pairs auto-merged; you’ll review more clusters manually.",
+    }
+    st.info(f"**Profile meaning** — {PROFILE_DESC.get(algo, '')}")
+
     params = ALGO_PRESETS[algo]
     st.markdown(
         f"**Thresholds**  \\\n"
@@ -467,7 +475,7 @@ if "state" not in st.session_state:
     }
 state = st.session_state.state
 
-# Parse
+# Parse uploads
 if uploaded:
     raws = []
     for up in uploaded:
@@ -488,138 +496,4 @@ if uploaded:
         if len(df):
             raws.append(df)
     if raws:
-        combined = pd.concat(raws, ignore_index=True)
-        combined["record_id"] = [f"R{100000+i}" for i in range(len(combined))]
-        state["raw_frames"] = raws
-        state["combined"] = combined
-
-# Overview
-if len(state["combined"]):
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Total records", f"{len(state['combined']):,}")
-    with c2:
-        st.metric("With DOI", f"{(state['combined']['doi'] != '').sum():,}")
-    with c3:
-        st.metric("With PMID", f"{(state['combined']['pmid'] != '').sum():,}")
-    with c4:
-        st.metric("Unique titles (pre-dedup est.)", f"{state['combined']['title'].nunique():,}")
-
-    with st.expander("Preview (sample vs full)"):
-        _preview_all = st.checkbox("Show all preview rows", value=False, key="preview_all")
-        _prev_df = state["combined"][CANON_COLS]
-        if not _preview_all:
-            _prev_df = _prev_df.head(30)
-        _prev_df = _prev_df.copy()
-        _prev_df.columns = _make_unique_columns(_prev_df.columns.tolist())
-        st.dataframe(_prev_df, use_container_width=True, hide_index=True)
-
-    run = st.button("🚀 Run deduplication", type="primary")
-    if run:
-        with st.spinner("Deduplicating…"):
-            deduped, removed, audit = build_clusters(state["combined"], algo=algo)
-            state["deduped"], state["removed"], state["audit"] = deduped, removed, audit
-        st.success("Done!")
-
-# Results
-if state.get("audit") is not None:
-    deduped = state["deduped"]
-    removed = state["removed"]
-    audit = state["audit"]
-
-    total = len(audit)
-    kept = len(deduped)
-    rem = len(removed)
-
-    st.subheader("Results")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Kept (deduplicated)", f"{kept:,}")
-    with c2:
-        st.metric("Removed as duplicates", f"{rem:,}")
-    with c3:
-        st.metric("Reduction", f"{(rem/total*100):.1f}%")
-
-    # Likelihood counts + colored badges
-    bucket_counts = audit["likelihood"].value_counts().reindex(
-        ["extremely_likely", "highly_likely", "possible", "review", "unique"], fill_value=0
-    )
-    LIKELIHOOD_COLORS = {
-        "extremely_likely": "#ef4444",  # red
-        "highly_likely":    "#f97316",  # orange
-        "possible":         "#eab308",  # amber
-        "review":           "#22c55e",  # green
-        "unique":           "#3b82f6",  # blue
-    }
-    def badge(lbl: str, count: int) -> str:
-        color = LIKELIHOOD_COLORS.get(lbl, "#6b7280")
-        text = lbl.replace("_", " ")
-        return (f'<span style="display:inline-block;padding:4px 8px;border-radius:999px;'
-                f'background:{color};color:white;font-size:12px;margin-right:8px;margin-bottom:6px;">'
-                f'{text}: {count}</span>')
-    legend_html = "".join(badge(lbl, int(bucket_counts.get(lbl, 0)))
-                          for lbl in ["extremely_likely", "highly_likely", "possible", "review", "unique"])
-    st.markdown(f"**Buckets:**<br/>{legend_html}", unsafe_allow_html=True)
-
-    # Deduplicated table (show all toggle)
-    with st.expander("View deduplicated records (sample vs full)"):
-        _all_dedup = st.checkbox("Show all deduplicated rows", value=True, key="dedup_all")
-        _dedup_view = deduped if _all_dedup else deduped.head(100)
-        _dedup_view = _dedup_view.copy()
-        _dedup_view.columns = _make_unique_columns(_dedup_view.columns.tolist())
-        st.dataframe(_dedup_view, use_container_width=True, hide_index=True)
-
-    # Removed table (show all toggle)
-    with st.expander("View removed duplicates (sample vs full)"):
-        _all_removed = st.checkbox("Show all removed rows", value=True, key="removed_all")
-        _removed_view = removed if _all_removed else removed.head(100)
-        _removed_view = _removed_view.copy()
-        _removed_view.columns = _make_unique_columns(_removed_view.columns.tolist())
-        st.dataframe(_removed_view, use_container_width=True, hide_index=True)
-
-    # Audit table (show all toggle)
-    with st.expander("Audit table (sample vs full)"):
-        show_cols = list(dict.fromkeys(
-            [c for c in CANON_COLS + ["cluster_id", "decision", "likelihood", "max_title_score"] if c in audit.columns]
-        ))
-        _all_audit = st.checkbox("Show all audit rows", value=True, key="audit_all")
-        _audit_view = audit[show_cols] if _all_audit else audit[show_cols].head(200)
-        _audit_view = _audit_view.copy()
-        _audit_view.columns = _make_unique_columns(_audit_view.columns.tolist())
-        st.dataframe(_audit_view, use_container_width=True, hide_index=True)
-
-    # Downloads (ALL rows)
-    st.subheader("Downloads (All rows)")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.download_button(
-            "⬇️ Deduplicated CSV (All)",
-            data=deduped.to_csv(index=False).encode("utf-8"),
-            file_name="deduplicated.csv",
-            mime="text/csv",
-        )
-    with c2:
-        st.download_button(
-            "⬇️ Removed (duplicates) CSV (All)",
-            data=removed.to_csv(index=False).encode("utf-8"),
-            file_name="duplicates_removed.csv",
-            mime="text/csv",
-        )
-    with c3:
-        st.download_button(
-            "⬇️ Audit CSV (All)",
-            data=audit.to_csv(index=False).encode("utf-8"),
-            file_name="dedup_audit.csv",
-            mime="text/csv",
-        )
-    with c4:
-        ris_txt = dataframe_to_ris(deduped)
-        st.download_button(
-            "⬇️ Deduplicated RIS (All)",
-            data=ris_txt.encode("utf-8"),
-            file_name="deduplicated.ris",
-            mime="application/x-research-info-systems",
-        )
-
-st.markdown("")
-st.caption("Inspired by SRA/TERA Deduplicator design (Forbes et al., 2024).")
+        com
